@@ -1,181 +1,67 @@
-from urllib.parse import urlparse
-import datetime
-import telebot
-import config
-import yt_dlp
-import re
-import os
-from telebot import types
-from telebot.util import quick_markup
+from flask import Flask, render_template, request
+import subprocess
+import threading
 
-bot = telebot.TeleBot(config.token)
-last_edited = {}
+app = Flask(__name__)
 
+def process_text(text, quality):
+    start_index = text.find("https://d1d34p8vz63oiq.cloudfront.net")
+    end_index = text.find("/dash/")
+    url = text[start_index:end_index]
 
-@bot.message_handler(commands=['start', 'help'])
-def test(message):
-    bot.reply_to(
-        message, "*Send me a video link* and I'll download it for you.", parse_mode="MARKDOWN", disable_web_page_preview=True)
+    final_url = url.replace("d1d34p8vz63oiq", "d26g5bnklkwsh4")
+    final_url = final_url.split("dash")[0] + "/hls/{}/main.m3u8".format(quality)
 
+    return final_url
 
-def video_url_validation(url):
-    video_regex = r'(https?://)?([^\s/$.?#].[^\s]*)'
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        # Get quality from the input form
+        quality = request.form['quality']
+        # Get the input text from the form
+        input_text_value = request.form['link']
+        # Get the desired file name from the form
+        file_name = request.form['file_name']
 
-    video_regex_match = re.match(video_regex, url)
-    if video_regex_match:
-        return video_regex_match
+        # Process the input text
+        final_link = process_text(input_text_value, quality)
 
-    return video_regex_match
+        # Construct the yt-dlp command with the desired file name
+        command = f'yt-dlp -f bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best -o "{file_name}.%(ext)s" --hls-prefer-native -N 8 "{final_link}"'
 
+        print("Download started!")
 
-def download_video(message, url, audio=False, format_id="mp4"):
-    url_info = urlparse(url)
-    if url_info.scheme:
-        def progress(d):
-            if d['status'] == 'downloading':
-                try:
-                    update = False
+        try:
+            # Execute the download command using subprocess asynchronously
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr with stdout to capture all logs
+                universal_newlines=True
+            )
 
-                    if last_edited.get(f"{message.chat.id}-{msg.message_id}"):
-                        if (datetime.datetime.now() - last_edited[f"{message.chat.id}-{msg.message_id}"]).total_seconds() >= 5:
-                            update = True
-                    else:
-                        update = True
+            # Start a thread to wait for the download process to complete
+            threading.Thread(target=wait_for_download, args=(process,)).start()
 
-                    if update:
-                        perc = round(d['downloaded_bytes'] *
-                                     100 / d['total_bytes'])
-                        bot.edit_message_text(
-                            chat_id=message.chat.id, message_id=msg.message_id, text=f"Downloading {d['info_dict']['title']}\n\n{perc}%")
-                        last_edited[f"{message.chat.id}-{msg.message_id}"] = datetime.datetime.now()
-                except Exception as e:
-                    print(e)
+            return 'Download started!'
 
-        msg = bot.reply_to(message, 'Downloading...')
-        with yt_dlp.YoutubeDL({'format': format_id, 'outtmpl': 'outputs/%(title)s.%(ext)s', 'progress_hooks': [progress], 'postprocessors': [{  # Extract audio using ffmpeg
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-        }] if audio else [], 'max_filesize': config.max_filesize}) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
+        except subprocess.CalledProcessError as e:
+            error_message = f"Download failed with error:\n\n{e.output}"
+            print(error_message)
+            return error_message
 
-                bot.edit_message_text(
-                    chat_id=message.chat.id, message_id=msg.message_id, text='Sending file to Telegram...')
-                try:
-                    if audio:
-                        bot.send_audio(message.chat.id, open(
-                            info['requested_downloads'][0]['filepath'], 'rb'), reply_to_message_id=message.message_id)
+    return render_template('index.html')
 
-                    else:
-                        bot.send_video(message.chat.id, open(
-                            info['requested_downloads'][0]['filepath'], 'rb'), reply_to_message_id=message.message_id)
-                    bot.delete_message(message.chat.id, msg.message_id)
-                except Exception as e:
-                    bot.edit_message_text(
-                        chat_id=message.chat.id, message_id=msg.message_id, text=f"Couldn't send file, make sure it's supported by Telegram and it doesn't exceed *{round(config.max_filesize / 1000000)}MB*", parse_mode="MARKDOWN")
-                    for file in info['requested_downloads']:
-                        os.remove(file['filepath'])
-                else:
-                    for file in info['requested_downloads']:
-                        os.remove(file['filepath'])
-            except Exception as e:
-                if isinstance(e, yt_dlp.utils.DownloadError):
-                    bot.edit_message_text(
-                        'Invalid URL', message.chat.id, msg.message_id)
-                else:
-                    bot.edit_message_text(
-                        'There was an error downloading your video', message.chat.id, msg.message_id)
-    else:
-        bot.reply_to(message, 'Invalid URL')
+def wait_for_download(process):
+    for line in iter(process.stdout.readline, ''):
+        print(line.strip())  # Print the log line from yt-dlp
 
+    # Wait for the process to finish
+    process.wait()
 
-def log(message, text: str, media: str):
-    if config.logs:
-        if message.chat.type == 'private':
-            chat_info = "Private chat"
-        else:
-            chat_info = f"Group: *{message.chat.title}* (`{message.chat.id}`)"
+    print("Download completed!")
 
-        bot.send_message(
-            config.logs, f"Download request ({media}) from @{message.from_user.username} ({message.from_user.id})\n\n{chat_info}\n\n{text}")
-
-
-def get_text(message):
-    if len(message.text.split(' ')) < 2:
-        if message.reply_to_message and message.reply_to_message.text:
-            return message.reply_to_message.text
-
-        else:
-            return None
-    else:
-        return message.text.split(' ')[1]
-
-
-@bot.message_handler(commands=['download'])
-def download_command(message):
-    text = get_text(message)
-    if not text:
-        bot.reply_to(
-            message, 'Invalid usage, use `/download url`', parse_mode="MARKDOWN")
-        return
-
-    log(message, text, 'video')
-    download_video(message, text)
-
-
-@bot.message_handler(commands=['audio'])
-def download_audio_command(message):
-    text = get_text(message)
-    if not text:
-        bot.reply_to(
-            message, 'Invalid usage, use `/audio url`', parse_mode="MARKDOWN")
-        return
-
-    log(message, text, 'audio')
-    download_video(message, text, True)
-
-
-@bot.message_handler(commands=['custom'])
-def custom(message):
-    text = get_text(message)
-    if not text:
-        bot.reply_to(
-            message, 'Invalid usage, use `/custom url`', parse_mode="MARKDOWN")
-        return
-
-    msg = bot.reply_to(message, 'Getting formats...')
-
-    with yt_dlp.YoutubeDL() as ydl:
-        info = ydl.extract_info(text, download=False)
-
-    data = {f"{x['resolution']}.{x['ext']}": {
-        'callback_data': f"{x['format_id']}"} for x in info['formats'] if x['video_ext'] != 'none'}
-
-    markup = quick_markup(data, row_width=2)
-
-    bot.delete_message(msg.chat.id, msg.message_id)
-    bot.reply_to(message, "Choose a format", reply_markup=markup)
-
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback(call):
-    if call.from_user.id == call.message.reply_to_message.from_user.id:
-        url = get_text(call.message.reply_to_message)
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        download_video(call.message.reply_to_message, url,
-                       format_id=f"{call.data}+bestaudio")
-    else:
-        bot.answer_callback_query(call.id, "You didn't send the request")
-
-
-@bot.message_handler(func=lambda m: True, content_types=["text", "pinned_message", "photo", "audio", "video", "location", "contact", "voice", "document"])
-def handle_private_messages(message):
-    text = message.text if message.text else message.caption if message.caption else None
-
-    if message.chat.type == 'private':
-        log(message, text, 'video')
-        download_video(message, text)
-        return
-
-
-bot.infinity_polling()
+if __name__ == '__main__':
+    app.run(debug=True)
