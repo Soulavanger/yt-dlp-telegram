@@ -12,35 +12,26 @@ bot = telebot.TeleBot(config.token)
 last_edited = {}
 
 
-def youtube_url_validation(url):
-    youtube_regex = (
-        r'(https?://)?(www\.)?'
-        '(youtube|youtu|youtube-nocookie)\.(com|be)/'
-        '(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})')
-
-    youtube_regex_match = re.match(youtube_regex, url)
-    if youtube_regex_match:
-        return youtube_regex_match
-
-    return youtube_regex_match
-
-
 @bot.message_handler(commands=['start', 'help'])
 def test(message):
     bot.reply_to(
-        message, "*Send me a video link* and I'll download it for you, works with *YouTube*, *Twitter*, *TikTok*, *Reddit* and more.\n\n_Powered by_ [yt-dlp](https://github.com/yt-dlp/yt-dlp/)", parse_mode="MARKDOWN", disable_web_page_preview=True)
+        message, "*Send me a video link* and I'll download it for you.", parse_mode="MARKDOWN", disable_web_page_preview=True)
+
+
+def video_url_validation(url):
+    video_regex = r'(https?://)?([^\s/$.?#].[^\s]*)'
+
+    video_regex_match = re.match(video_regex, url)
+    if video_regex_match:
+        return video_regex_match
+
+    return video_regex_match
 
 
 def download_video(message, url, audio=False, format_id="mp4"):
     url_info = urlparse(url)
     if url_info.scheme:
-        if url_info.netloc in ['www.youtube.com', 'youtu.be', 'youtube.com', 'youtu.be']:
-            if not youtube_url_validation(url):
-                bot.reply_to(message, 'Invalid URL')
-                return
-
         def progress(d):
-
             if d['status'] == 'downloading':
                 try:
                     update = False
